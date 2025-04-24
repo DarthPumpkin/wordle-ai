@@ -202,9 +202,10 @@ class InteractivePolicy(Policy):
 
 
 class Game:
-    def __init__(self, word_lists: {str: [str]}, solution=None, n_attempts=6, policy=None):
+    def __init__(self, word_lists: {str: [str]}, solution=None, hard_mode=False, n_attempts=6, policy=None):
         self.word_lists = word_lists
         self.solution = solution or random.choice(self.word_lists['solutions'])
+        self.hard_mode = hard_mode
         self.policy = policy or RandomValidPolicy(word_lists)
         self.n_attempts = n_attempts
 
@@ -213,6 +214,9 @@ class Game:
         clues = []
         for t in range(self.n_attempts):
             guess = self.policy.guess()
+            violates_hard_mode = self.hard_mode and not all(all(p.satisfies(guess) for p in clue) for clue in clues)
+            if guess not in self.word_lists['guesses'] or violates_hard_mode:
+                raise ValueError(f"Invalid guess: {guess}")
             clue = make_predicates(guess, self.solution)
             self.policy.observe(guess, clue)
             guesses.append(guess)
@@ -263,7 +267,7 @@ def main():
     if not args.batch:
         policy = new_policy(args.policy, word_lists, hard_mode=args.hard_mode, clue_matrix=clue_matrix)
 
-        game = Game(word_lists, policy=policy, solution=args.solution)
+        game = Game(word_lists, policy=policy, solution=args.solution, hard_mode=args.hard_mode)
         guesses, clues = game.play()
         clue_strs = ["".join(p.emoji() for p in preds) for preds in clues]
         print(f"Wordle {game.solution} {len(guesses)}/{game.n_attempts}")
@@ -277,7 +281,7 @@ def main():
         results = {'statistics': defaultdict(int), 'games': []}
         for r, solution in enumerate(tqdm(solutions)):
             policy = new_policy(args.policy, word_lists, hard_mode=args.hard_mode, clue_matrix=clue_matrix)
-            game = Game(word_lists, policy=policy, solution=solution)
+            game = Game(word_lists, policy=policy, solution=solution, hard_mode=args.hard_mode)
             guesses, clues = game.play()
             results['games'].append({'solution': solution, 'guesses': guesses})
             if guesses[-1] == game.solution:

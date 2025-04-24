@@ -186,18 +186,19 @@ class GreedyHeuristicPolicy(Policy):
 
 
 class InteractivePolicy(Policy):
-    def __init__(self, word_lists: WordLists):
+    def __init__(self, word_lists: WordLists, dark_mode=True):
         self.word_lists = word_lists
+        self.dark_mode = dark_mode
 
     def guess(self) -> str:
         s = input('> ')
         while s not in self.word_lists['guesses']:
             print("Not in word list. Try again")
-            s = input()
+            s = input('> ')
         return s
 
     def observe(self, guess: str, predicates: Clue):
-        s = "".join(p.emoji() for p in predicates)
+        s = "".join(p.emoji(dark_mode=self.dark_mode) for p in predicates)
         print(s)
 
 
@@ -226,9 +227,9 @@ class Game:
         return guesses, clues
 
 
-def new_policy(policy_name: str, word_lists: WordLists, hard_mode: bool, clue_matrix: Optional[np.ndarray] = None) -> Policy:
+def new_policy(policy_name: str, word_lists: WordLists, hard_mode: bool, clue_matrix: Optional[np.ndarray] = None, dark_mode=True) -> Policy:
     if policy_name == "interactive":
-        policy = InteractivePolicy(word_lists)
+        policy = InteractivePolicy(word_lists, dark_mode=dark_mode)
     elif policy_name == "randomValid":
         policy = RandomValidPolicy(word_lists)
     elif policy_name == "greedyHeuristic":
@@ -243,18 +244,21 @@ def main():
     parser.add_argument('--policy', help="the policy to use", default='interactive')
     parser.add_argument('--batch', help="run multiple wordles from the word list", default=None)
     parser.add_argument('--hard-mode', help="run in hard mode", action='store_true')
+    parser.add_argument('--word-list', help="the word list to use", default='words.json')
+    parser.add_argument('--dark-mode', help="dark mode", action='store_true')
     parser.add_argument('solution', help="the correct solution", default=None)
 
     args = parser.parse_args()
 
     print("Loading word lists...")
-    with open('words.json', 'r', encoding='utf-8') as fp:
+    with open(args.word_list, 'r', encoding='utf-8') as fp:
         word_lists = json.load(fp)
         word_lists['guesses'] += word_lists['solutions']
         # TODO: why this filtering?
         word_lists['solutions'] = [w for w in word_lists['solutions'] if all(w[i] not in w[i + 1:] for i in range(4))]
 
     try:
+        print("Loading clue matrix")
         clue_matrix = np.load('clue_matrix.npy')
     except IOError:
         print("Computing clue matrix")
@@ -266,7 +270,7 @@ def main():
         print("Made clue matrix")
 
     if not args.batch:
-        policy = new_policy(args.policy, word_lists, hard_mode=args.hard_mode, clue_matrix=clue_matrix)
+        policy = new_policy(args.policy, word_lists, hard_mode=args.hard_mode, clue_matrix=clue_matrix, dark_mode=args.dark_mode)
 
         game = Game(word_lists, policy=policy, solution=args.solution, hard_mode=args.hard_mode)
         guesses, clues = game.play()
@@ -291,7 +295,7 @@ def main():
                 results['statistics'][-1] += 1
         print("Saving results")
         with open('results.json', mode='w', encoding='utf-8') as fp:
-            json.dump(results, fp)
+            json.dump(results, fp, indent=2, ensure_ascii=False)
         print("Statistics:")
         stats = {k: round(v / sum(results['statistics'].values()), 3) for k, v in results['statistics'].items()}
         print(stats)

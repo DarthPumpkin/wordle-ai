@@ -142,47 +142,80 @@ class RandomValidPolicy(Policy):
 
 
 class GreedyHeuristicPolicy(Policy):
-    """Guesses the word that minimizes the expected uncertainty about the solution, looking one step ahead.
+    """Guesses the word with the highest clue entropy.
     
     Formally, let $C(G, S)$ be the clue obtained by guessing $G$ when the solution is $S$.
-    We represent a clue by the list of words that are incompatible with the guess.
-    Then, for a sequence of clues $C_1, C_2, \\ldots, C_n$, the remaining uncertinty is given by
-    $U(C_1, C_2, \\ldots, C_n) = U_0 - |\\Cup_i C_i|$.
-
-    The greedy heuristic policy guesses the word $G$ that maximizes the expected uncertainty
-    $E[U(C_1, C_2, \\ldots, C_n, C(G_{n+1}, S))]$ over $G_{n+1}$, where the randomness is over the possible solutions $S$.
+    A clue is given by a list of colors (green, yellow, black), one for each of the five letters in the guess.
+    The corresponding clue number is this list interpreted as a number in base-3, i.e., a number between 0 and 3^5 - 1.
+    The clue entropy for $G$ is the entropy of the distribution of clue numbers $H[C(G, S)]$ with the randomness taken over $S$.
     """
     def __init__(self, word_lists: WordLists, clue_matrix: np.ndarray, hard_mode=False, n_attempts=6):
-        self.word_lists = word_lists
+        """Params:
+        word_lists: dict[str, list[str]]: word lists. The 'solutions' list must be a subset of the 'guesses' list.
+        clue_matrix: np.ndarray: clue matrix. The rows are guesses and the columns are solutions.
+        hard_mode: bool: if True, the policy will only guess words that are compatible with the predicates.
+        n_attempts: int: number of total attempts.
+        """
+        guess_list_sorted = sorted(word_lists['guesses'])
+        solution_list_sorted = sorted(word_lists['solutions'])
+        solution_set = set(solution_list_sorted)
+        self.possible_guesses = np.ones(len(guess_list_sorted), dtype=np.bool_)
+        # tracks which solutions are still possible, gets updated with each guess
+        self.possible_solutions = np.zeros(len(guess_list_sorted), dtype=np.bool_)
+        for i, w in enumerate(guess_list_sorted):
+            self.possible_solutions[i] = w in solution_set
+        # mask of solution words within the guess list
+        self.initial_solution_mask = self.possible_solutions.copy()
+        self.guess_list_sorted = guess_list_sorted
         self.clue_matrix = clue_matrix
-        self.predicates: list[Predicate] = []  # flat list of predicates
         self.hard_mode = hard_mode
         self.remaining = n_attempts
 
     def observe(self, guess: str, predicates: Clue):
-        self.predicates += predicates
+        for i, w in enumerate(self.guess_list_sorted):
+            if self.possible_solutions[i]:
+                self.possible_solutions[i] = all(p.satisfies(w) for p in predicates)
+            if self.possible_guesses[i]:
+                self.possible_guesses[i] = all(p.satisfies(w) for p in predicates)
         self.remaining -= 1
 
     def guess(self) -> str:
-        guess_list = self.word_lists['guesses']
-        solution_list = self.word_lists['solutions']
-        possible = np.array([all(p.satisfies(w) for p in self.predicates) for w in solution_list], dtype=np.bool_)
-        if self.remaining >= possible.sum():  # limit guesses to valid solutions
-            solutions = [s for (p, s) in zip(possible, solution_list) if p]
-            guess_idcs = [i for i, g in enumerate(guess_list) if g in solutions]
-            guess_list = [guess_list[i] for i in guess_idcs]
-            possible_clue_matrix = self.clue_matrix[guess_idcs][:, possible]
-        elif self.hard_mode:  # limit guesses to valid
-            guess_idcs = [i for i, g in enumerate(guess_list) if all(p.satisfies(g) for p in self.predicates)]
-            guess_list = [guess_list[i] for i in guess_idcs]
-            possible_clue_matrix = self.clue_matrix[guess_idcs][:, possible]
-        else:
-            possible_clue_matrix = self.clue_matrix[:, possible]
-        # pcm_decimal = np.sum([possible_clue_matrix[:, :, i] * 3**i for i in range(5)], axis=0)
-        clue_counts = [np.unique(row, return_counts=True)[1] for row in possible_clue_matrix]
+        n_possible_solutions = np.sum(self.possible_solutions, dtype=int)
+        if self.remaining >= n_possible_solutions:  # we are guaranteed to win if we pick a possible solution
+            guess_candidates = self.possible_solutions
+        elif self.hard_mode:  # we must pick a possible guess
+            guess_candidates = self.possible_guesses
+        else:  # anything goes
+            guess_candidates = np.ones(len(self.guess_list_sorted), dtype=np.bool_)
+
+        # convert mask over guess list to mask over solution list
+        mask_within_solutions = self.possible_solutions[self.initial_solution_mask]
+        clue_submatrix = self.clue_matrix[guess_candidates][:, mask_within_solutions]
+        clue_counts = [np.unique(row, return_counts=True)[1] for row in clue_submatrix]
         entropies = [scipy.stats.entropy(row) for row in clue_counts]
         action_idx = np.argmax(entropies)
-        return guess_list[action_idx]
+
+        # convert action_idx to index in guess_list_sorted
+        guess_idx = np.where(guess_candidates)[0][action_idx]
+
+        return self.guess_list_sorted[guess_idx]
+        # n_guess_candidates = np.sum(guess_candidates, dtype=int)
+        # guess_candidate_list = [w for w, p in zip(self.guess_list_sorted, guess_candidates) if p]
+        # possible_solutions_list = [w for w, p in zip(self.guess_list_sorted, self.possible_solutions) if p]
+
+        # # How much would each guess-solution pair reduce the uncertainty about the solution?
+        # gs_uncertainty_reductions = np.zeros(clue_submatrix.shape, dtype=np.uint32)
+        # for gi, si in tqdm(it.product(range(n_guess_candidates), range(n_possible_solutions)),
+        #                    total=n_guess_candidates * n_possible_solutions):
+        #     clue = clue_submatrix[gi, si]
+        #     preds = convert_code(clue, guess_candidate_list[gi])
+        #     for possible_solution in possible_solutions_list:
+        #         if not all(p.satisfies(possible_solution) for p in preds):
+        #             gs_uncertainty_reductions[gi, si] += 1
+
+        # expected_uncertainty_reductions = np.sum(gs_uncertainty_reductions, axis=1)
+        # action_idx = np.argmax(expected_uncertainty_reductions)
+        # return guess_candidate_list[action_idx]
 
 
 class InteractivePolicy(Policy):
@@ -239,21 +272,13 @@ def new_policy(policy_name: str, word_lists: WordLists, hard_mode: bool, clue_ma
     return policy
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Solve a Wordle.")
-    parser.add_argument('--policy', help="the policy to use", default='interactive')
-    parser.add_argument('--batch', help="run multiple wordles from the word list", default=None)
-    parser.add_argument('--hard-mode', help="run in hard mode", action='store_true')
-    parser.add_argument('--word-list', help="the word list to use", default='words.json')
-    parser.add_argument('--dark-mode', help="dark mode", action='store_true')
-    parser.add_argument('solution', help="the correct solution", default=None)
-
-    args = parser.parse_args()
-
+def run(word_list: str, solution: str, policy: str, hard_mode: bool, batch: Optional[str], dark_mode: bool):
     print("Loading word lists...")
-    with open(args.word_list, 'r', encoding='utf-8') as fp:
+    with open(word_list, 'r', encoding='utf-8') as fp:
         word_lists = json.load(fp)
         word_lists['guesses'] += word_lists['solutions']
+        word_lists['guesses'] = sorted(set(word_lists['guesses']))
+        word_lists['solutions'] = sorted(set(word_lists['solutions']))
         # TODO: why this filtering?
         word_lists['solutions'] = [w for w in word_lists['solutions'] if all(w[i] not in w[i + 1:] for i in range(4))]
 
@@ -269,24 +294,24 @@ def main():
         np.save('clue_matrix.npy', clue_matrix)
         print("Made clue matrix")
 
-    if not args.batch:
-        policy = new_policy(args.policy, word_lists, hard_mode=args.hard_mode, clue_matrix=clue_matrix, dark_mode=args.dark_mode)
+    if not batch:
+        policy_obj = new_policy(policy, word_lists, hard_mode=hard_mode, clue_matrix=clue_matrix, dark_mode=dark_mode)
 
-        game = Game(word_lists, policy=policy, solution=args.solution, hard_mode=args.hard_mode)
+        game = Game(word_lists, policy=policy_obj, solution=solution, hard_mode=hard_mode)
         guesses, clues = game.play()
         clue_strs = ["".join(p.emoji() for p in preds) for preds in clues]
         print(f"Wordle {game.solution} {len(guesses)}/{game.n_attempts}")
         for guess, clue_str in zip(guesses, clue_strs):
             print(f"{guess}\t{clue_str}")
     else:
-        if args.batch == 'all':
+        if batch == 'all':
             solutions = word_lists['solutions']
         else:
-            solutions = random.sample(word_lists['solutions'], int(args.batch))
+            solutions = random.sample(word_lists['solutions'], int(batch))
         results = {'statistics': defaultdict(int), 'games': []}
         for _r, solution in enumerate(tqdm(solutions)):
-            policy = new_policy(args.policy, word_lists, hard_mode=args.hard_mode, clue_matrix=clue_matrix)
-            game = Game(word_lists, policy=policy, solution=solution, hard_mode=args.hard_mode)
+            policy_obj = new_policy(policy, word_lists, hard_mode=hard_mode, clue_matrix=clue_matrix)
+            game = Game(word_lists, policy=policy_obj, solution=solution, hard_mode=hard_mode)
             guesses, clues = game.play()
             results['games'].append({'solution': solution, 'guesses': guesses})
             if guesses[-1] == game.solution:
@@ -301,5 +326,25 @@ def main():
         print(stats)
 
 
+def main():
+    parser = argparse.ArgumentParser(description="Solve a Wordle.")
+    parser.add_argument('--policy', help="the policy to use", default='interactive')
+    parser.add_argument('--batch', help="run multiple wordles from the word list", default=None)
+    parser.add_argument('--hard-mode', help="run in hard mode", action='store_true')
+    parser.add_argument('--word-list', help="the word list to use", default='words.json')
+    parser.add_argument('--dark-mode', help="dark mode", action='store_true')
+    parser.add_argument('solution', help="the correct solution", default=None)
+
+    args = parser.parse_args()
+
+    print(vars(args))
+    run(**vars(args))
+
+
+def debug():
+    run('words_sv.json', 'svara', 'greedyHeuristic', hard_mode=False, batch=None, dark_mode=False)
+
+
 if __name__ == '__main__':
     main()
+    # debug()

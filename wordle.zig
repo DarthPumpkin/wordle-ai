@@ -34,6 +34,7 @@ fn clueEntropiesNoisy(comptime F: type, allocator: std.mem.Allocator, clue_mat_b
             weighted_counts[clue_row[j]] += sol_probs[j];
         }
         const noisy_clue_prob = try matVecMul(F, allocator, kernel, kernel_idx, &weighted_counts);
+        defer allocator.free(noisy_clue_prob);
         entropies_[i] = entropyBits(F, noisy_clue_prob);
     }
     return entropies_;
@@ -217,6 +218,19 @@ test "entropies" {
     try std.testing.expectApproxEqAbs(0.0, error_, std.math.floatEps(f64));
 }
 
+test "entropiesNoisy" {
+    const al = std.testing.allocator;
+
+    const inputs = try EntropiesInputs.initRand(al, 5, 4);
+    defer inputs.deinit();
+
+    const kernel = try noiseKernel(f64, al, 0.5);
+    defer al.free(kernel);
+
+    const out = try clueEntropiesNoisy(f64, al, inputs.clues, inputs.index, inputs.probs, kernel);
+    defer al.free(out);
+}
+
 test "noiseKernel" {
     const al = std.testing.allocator;
 
@@ -362,7 +376,11 @@ test "Bench 2000x20_000" {
 }
 
 test "Bench 10_000x1000 noisy" {
-    const al = std.heap.page_allocator;
+    const base_al = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(base_al);
+    defer arena.deinit();
+    const al = arena.allocator();
+
     const rows = 10_000;
     const cols = 1000;
 
@@ -371,15 +389,23 @@ test "Bench 10_000x1000 noisy" {
     const kernel = try noiseKernel(f64, al, 0.5);
     defer al.free(kernel);
 
+    const num_clues_usize: usize = @intCast(NUM_CLUES);
+    var buffer: [(rows + num_clues_usize) * 8]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(buffer[0..]);
+    const fba_al = fba.allocator();
     const tic = std.time.milliTimestamp();
-    const entropies_ = try clueEntropiesNoisy(f64, al, inputs_.clues, inputs_.index, inputs_.probs, kernel);
+    const entropies_ = try clueEntropiesNoisy(f64, fba_al, inputs_.clues, inputs_.index, inputs_.probs, kernel);
     defer al.free(entropies_);
     const toc = std.time.milliTimestamp();
     try printLn("10_000 x   1000 took {d}ms (noisy)", .{toc - tic});
 }
 
 test "Bench 10_000x1000 noisy f32" {
-    const al = std.heap.page_allocator;
+    const base_al = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(base_al);
+    defer arena.deinit();
+    const al = arena.allocator();
+
     const rows = 10_000;
     const cols = 1000;
 
@@ -396,7 +422,11 @@ test "Bench 10_000x1000 noisy f32" {
 }
 
 test "Bench 1000x10_000 noisy" {
-    const al = std.heap.page_allocator;
+    const base_al = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(base_al);
+    defer arena.deinit();
+    const al = arena.allocator();
+
     const rows = 1000;
     const cols = 10_000;
 

@@ -3,6 +3,7 @@ const std = @import("std");
 const NUM_COLORS = 3;
 const WORD_LEN = 5;
 const NUM_CLUES = std.math.powi(u8, NUM_COLORS, WORD_LEN) catch unreachable;
+const simd_len = 8; // trial and error. Unclear why this is the best one.
 
 const WordleError = error{
     ShapeMismatch,
@@ -27,7 +28,7 @@ fn clueEntropiesNoisy(comptime F: type, allocator: std.mem.Allocator, clue_mat_b
     for (0..clue_mat_index.rows) |i| {
         var weighted_counts = [_]F{0.0} ** NUM_CLUES;
         const row_start = clue_mat_index.linearIndex(i, 0).?;
-        const row_end = clue_mat_index.linearIndex(i + 1, 0).?;
+        const row_end = row_start + clue_mat_index.cols;
         const clue_row = clue_mat_buf[row_start..row_end];
         for (0..clue_mat_index.cols) |j| {
             weighted_counts[clue_row[j]] += sol_probs[j];
@@ -70,24 +71,24 @@ fn entropyBits(comptime F: type, dist: []const F) F {
     return h;
 }
 
-fn noiseKernel(al: std.mem.Allocator, p_flip: f64) ![]f64 {
+fn noiseKernel(comptime F: type, al: std.mem.Allocator, p_flip: F) ![]F {
     const num_clues_usize: usize = NUM_CLUES;
-    var buf = try al.alloc(f64, num_clues_usize * num_clues_usize);
+    var buf = try al.alloc(F, num_clues_usize * num_clues_usize);
     const idx = Index2d.initRowMajor(NUM_CLUES, NUM_CLUES);
     for (0..idx.rows) |i| {
         for (0..idx.cols) |j| {
             const dist = hammingDist(@intCast(i), @intCast(j));
-            buf[idx.linearIndex(i, j).?] = transitionProb(p_flip, dist);
+            buf[idx.linearIndex(i, j).?] = transitionProb(F, p_flip, dist);
         }
     }
     return buf;
 }
 
-fn transitionProb(p_flip: f64, hamming_dist: u8) f64 {
-    const dist_f64: f64 = @floatFromInt(hamming_dist);
+fn transitionProb(comptime F: type, p_flip: F, hamming_dist: u8) F {
+    const dist_f: F = @floatFromInt(hamming_dist);
     const p_individual = p_flip / (NUM_COLORS - 1);
-    const factor1 = std.math.pow(f64, 1 - p_flip, WORD_LEN - dist_f64);
-    const factor2 = std.math.pow(f64, p_individual, dist_f64);
+    const factor1 = std.math.pow(F, 1 - p_flip, WORD_LEN - dist_f);
+    const factor2 = std.math.pow(F, p_individual, dist_f);
     return factor1 * factor2;
 }
 
@@ -120,7 +121,7 @@ fn matVecMul(comptime F: type, al: std.mem.Allocator, mat_buf: []const F, mat_id
         const row_start = mat_idx.linearIndex(i, 0).?;
         const row_end = row_start + mat_idx.cols;
         const row = mat_buf[row_start..row_end];
-        result[i] = dot(F, row, vec);
+        result[i] = dotSimd(F, row, vec);
     }
     return result;
 }
@@ -129,6 +130,24 @@ fn dot(comptime F: type, v1: []const F, v2: []const F) F {
     var sum: F = 0;
     for (v1, v2) |a, b| {
         sum += a * b;
+    }
+    return sum;
+}
+
+fn dotSimd(comptime F: type, v1: []const F, v2: []const F) F {
+    // const simd_len = comptime std.atomic.cache_line / @bitSizeOf(F);
+    // std.simd.suggestVectorLengthForCpu(F, comptime cpu: std.Target.Cpu)
+    var sum: F = 0;
+    var offset: usize = 0;
+    while (offset + simd_len <= v1.len) : (offset += simd_len) {
+        const v1_simd: @Vector(simd_len, F) = v1[offset..][0..simd_len].*;
+        const v2_simd: @Vector(simd_len, F) = v2[offset..][0..simd_len].*;
+        sum += @reduce(.Add, v1_simd * v2_simd);
+    }
+    if (offset < v1.len) {
+        for (v1[offset..], v2[offset..]) |a, b| {
+            sum += a * b;
+        }
     }
     return sum;
 }
@@ -201,7 +220,7 @@ test "entropies" {
 test "noiseKernel" {
     const al = std.testing.allocator;
 
-    const actual = try noiseKernel(al, 0.5);
+    const actual = try noiseKernel(f64, al, 0.5);
     defer al.free(actual);
     try std.testing.expectApproxEqAbs(1.0 / 32.0, actual[0], std.math.floatEps(f64));
     try std.testing.expectApproxEqAbs(1.0 / 64.0, actual[1], std.math.floatEps(f64));
@@ -222,7 +241,7 @@ test "hammingDist" {
 }
 
 test "transitionProb" {
-    try std.testing.expectApproxEqAbs(1.0 / 32.0, transitionProb(0.5, 0), std.math.floatEps(f64));
+    try std.testing.expectApproxEqAbs(1.0 / 32.0, transitionProb(f64, 0.5, 0), std.math.floatEps(f64));
 }
 
 test "matVecMul" {
@@ -349,7 +368,7 @@ test "Bench 10_000x1000 noisy" {
 
     const inputs_ = try EntropiesInputs.initRand(al, rows, cols);
     defer inputs_.deinit();
-    const kernel = try noiseKernel(al, 0.5);
+    const kernel = try noiseKernel(f64, al, 0.5);
     defer al.free(kernel);
 
     const tic = std.time.milliTimestamp();
@@ -359,6 +378,23 @@ test "Bench 10_000x1000 noisy" {
     try printLn("10_000 x   1000 took {d}ms (noisy)", .{toc - tic});
 }
 
+test "Bench 10_000x1000 noisy f32" {
+    const al = std.heap.page_allocator;
+    const rows = 10_000;
+    const cols = 1000;
+
+    const inputs_ = try EntropiesInputs32.initRand(al, rows, cols);
+    defer inputs_.deinit();
+    const kernel = try noiseKernel(f32, al, 0.5);
+    defer al.free(kernel);
+
+    const tic = std.time.milliTimestamp();
+    const entropies_ = try clueEntropiesNoisy(f32, al, inputs_.clues, inputs_.index, inputs_.probs, kernel);
+    defer al.free(entropies_);
+    const toc = std.time.milliTimestamp();
+    try printLn("10_000 x   1000 took {d}ms (noisy, f32)", .{toc - tic});
+}
+
 test "Bench 1000x10_000 noisy" {
     const al = std.heap.page_allocator;
     const rows = 1000;
@@ -366,7 +402,7 @@ test "Bench 1000x10_000 noisy" {
 
     const inputs_ = try EntropiesInputs.initRand(al, rows, cols);
     defer inputs_.deinit();
-    const kernel = try noiseKernel(al, 0.5);
+    const kernel = try noiseKernel(f64, al, 0.5);
     defer al.free(kernel);
 
     const tic = std.time.milliTimestamp();

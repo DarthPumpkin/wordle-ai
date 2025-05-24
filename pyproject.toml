@@ -6,6 +6,7 @@ package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.12"
+numba = "0.61.2"
 numpy = "^2.2.5"
 scipy = "^1.15.2"
 tqdm = "^4.67.1"
